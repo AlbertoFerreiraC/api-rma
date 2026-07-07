@@ -1,0 +1,35 @@
+# Dependencias de Composer
+/vendor/
+
+# Variables de entorno
+.env
+.env.local
+
+# Configuración sensible
+db.php
+
+# Logs
+*.log
+logs/
+
+# Caché
+cache/
+tmp/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Configuración de IDE
+.idea/
+.vscode/
+
+# PHPUnit
+.phpunit.result.cache
+
+# Archivos temporales
+*.tmp
+*.swp
+
+# Composer
+composer.phar
