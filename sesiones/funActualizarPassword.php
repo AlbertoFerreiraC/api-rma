@@ -83,7 +83,7 @@ try {
         exit;
     }
 
-    // ============================= 
+    // =============================  
     // GENERAR NUEVO HASH
     // =============================
     $nuevoHash = password_hash($passNueva, PASSWORD_DEFAULT);
