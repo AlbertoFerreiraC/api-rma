@@ -80,7 +80,7 @@ try {
         REDIRECCIÓN POR ROL
     ========================= */
     $redirigirA = "inicio";
-
+ 
     if ((int) $user["id_rol"] === 1) {
         $redirigirA = "perfil_tecnico";
     }
