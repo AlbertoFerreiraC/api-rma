@@ -72,14 +72,17 @@ if ($action === "guardar" && $_SERVER["REQUEST_METHOD"] === "POST") {
     try {
         $id_cliente = intval($_POST["id_cliente"] ?? 0);
         $id_tecnico = intval($_POST["id_tecnico"] ?? 0);
-        $id_tipo_caso = intval($_POST["id_tipo_case"] ?? 0);
+
+        // ✅ CORRECCIÓN CRÍTICA: Se lee 'id_tipo_caso' directamente del Payload
+        $id_tipo_caso = intval($_POST["id_tipo_caso"] ?? $_POST["id_tipo_case"] ?? 0);
+
         $equipo = trim($_POST["equipo"] ?? "");
         $marca = trim($_POST["marca"] ?? "");
         $modelo = trim($_POST["modelo"] ?? "");
         $numero_serie = trim($_POST["numero_serie"] ?? "");
         $descripcion_problema = trim($_POST["descripcion_problema"] ?? "");
 
-        $id_estado_inicial = 1;
+        $id_estado_inicial = 1; // 1: Ingresado / En Diagnóstico
 
         if ($id_cliente <= 0 || $id_tipo_caso <= 0 || $equipo === "" || $marca === "" || $numero_serie === "") {
             throw new Exception("Datos obligatorios incompletos en el vector de transmisión.");
@@ -158,9 +161,6 @@ if ($action === "guardar" && $_SERVER["REQUEST_METHOD"] === "POST") {
 
         $secret_salt = "MICRO_EXPRESS_SECURE_TOKEN_2026";
         $hash_seguro = base64_encode($numero_caso_final . "||" . md5($numero_caso_final . $secret_salt));
-
-        $protocolo = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https://" : "http://";
-        $host = $_SERVER['HTTP_HOST'];
 
         $url_visualizacion = $protocolo . $host . "/rma-app/comprobante-caso.php?token=" . urlencode($hash_seguro);
 
