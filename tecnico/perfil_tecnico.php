@@ -1,12 +1,12 @@
 <?php
 
-ini_set('display_errors', 1);
-error_reporting(E_ALL);
-
 header("Content-Type: application/json; charset=UTF-8");
 header("Cache-Control: no-cache, no-store, must-revalidate");
 
-require_once "../db.php";
+require_once __DIR__ . '/../inventario/remisiones_auth.php';
+rmaPermitir([1, 2]);
+require_once __DIR__ . '/../db.php';
+require_once __DIR__ . '/../inventario/remisiones_service.php';
 
 if (!isset($pdo)) {
     echo json_encode(["status" => "error", "message" => "Sin conexión con la base de datos."]);
@@ -17,7 +17,7 @@ $action = $_GET["action"] ?? $_POST["action"] ?? "";
 
 if ($action === "consultar_estacion") {
     try {
-        $idTecnico = $_GET["id_tecnico"] ?? null;
+        $idTecnico = rmaRol() === 1 ? rmaUsuarioId() : ($_GET["id_tecnico"] ?? null);
 
         // Condición para filtrar por técnico o mostrar todos si es superusuario
         $whereTecnico = "";
@@ -93,9 +93,6 @@ if ($action === "consultar_estacion") {
         $stmtEst->execute();
         $estadosCaso = $stmtEst->fetchAll(PDO::FETCH_ASSOC);
 
-        $stmtStk = $pdo->prepare("SELECT id, nombre, cantidad, precio_venta FROM dosisma_rma_bd.stock WHERE cantidad > 0 ORDER BY nombre ASC");
-        $stmtStk->execute();
-        $stockInsumos = $stmtStk->fetchAll(PDO::FETCH_ASSOC);
 
         echo json_encode([
             "status" => "success",
@@ -111,7 +108,7 @@ if ($action === "consultar_estacion") {
             "casos_proceso" => $casosProceso,
             "casos_despachados" => $casosDespachados,
             "estados_caso" => $estadosCaso,
-            "stock_insumos" => $stockInsumos
+            "stock_insumos" => []
         ]);
 
     } catch (Exception $e) {
@@ -120,82 +117,60 @@ if ($action === "consultar_estacion") {
     exit;
 }
 
-// Guardar Avance Técnico desde Modal
-if ($action === "guardar_avance") {
+// Guardar avance y consumo con una sola transacción: nunca hay nota sin stock/consumo.
+if ($action === 'guardar_avance') {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        http_response_code(405);
+        echo json_encode(['status' => 'error', 'message' => 'Se requiere POST.']);
+        exit;
+    }
+    rmaCsrfValidar();
     try {
-        $idCaso = $_POST["id_caso"] ?? null;
-        $idEstado = $_POST["id_estado"] ?? null;
-        $idInsumo = $_POST["id_insumo"] ?? null;
-        $diagnostico = $_POST["diagnostico"] ?? "";
-        $idTecnico = $_POST["id_tecnico"] ?? null;
-
-        if (!$idCaso || !$idEstado) {
-            echo json_encode(["status" => "error", "message" => "Faltan parámetros obligatorios."]);
-            exit;
+        $idCaso = (int) ($_POST['id_caso'] ?? 0);
+        $idEstado = (int) ($_POST['id_estado'] ?? 0);
+        $idInsumo = (int) ($_POST['id_insumo'] ?? 0);
+        if (rmaRol() === 1 && $idInsumo > 0) {
+            throw new DomainException('Para pedir un repuesto usá Agregar remisión. El stock lo gestiona depósito.');
         }
-
-        // 1. Obtener nombre del estado para verificar si es cierre
-        $stmtEstNom = $pdo->prepare("SELECT nombre FROM dosisma_rma_bd.estados_caso WHERE id = :id");
-        $stmtEstNom->execute([":id" => $idEstado]);
-        $nombreEstado = strtolower($stmtEstNom->fetch(PDO::FETCH_ASSOC)['nombre'] ?? '');
-
-        $fechaCierre = null;
-        if (strpos($nombreEstado, 'listo') !== false || strpos($nombreEstado, 'entregado') !== false || strpos($nombreEstado, 'resuelto') !== false) {
-            $fechaCierre = date('Y-m-d H:i:s');
+        $diagnostico = trim((string) ($_POST['diagnostico'] ?? ''));
+        $idTecnico = rmaUsuarioId();
+        if ($idCaso < 1 || $idEstado < 1 || $diagnostico === '' || strlen($diagnostico) > 10000) {
+            throw new InvalidArgumentException('Completá el caso, el estado y el informe técnico.');
         }
-
-        // 2. Actualizar Caso
-        $sqlUp = "UPDATE dosisma_rma_bd.casos 
-                  SET id_estado_actual = :id_estado, 
-                      diagnostico_final = :diagnostico " .
-            ($fechaCierre ? ", fecha_cierre = '$fechaCierre' " : "") .
-            "WHERE id = :id_caso";
-        $stmtUp = $pdo->prepare($sqlUp);
-        $stmtUp->execute([
-            ":id_estado" => $idEstado,
-            ":diagnostico" => $diagnostico,
-            ":id_caso" => $idCaso
-        ]);
-
-        // 3. Insertar Historial de Estado
-        $sqlHist = "INSERT INTO dosisma_rma_bd.historial_estados (id_caso, id_estado, fecha, observacion, id_usuario)
-                    VALUES (:id_caso, :id_estado, NOW(), :obs, :id_usuario)";
-        $stmtHist = $pdo->prepare($sqlHist);
-        $stmtHist->execute([
-            ":id_caso" => $idCaso,
-            ":id_estado" => $idEstado,
-            ":obs" => $diagnostico,
-            ":id_usuario" => $idTecnico
-        ]);
-
-        // 4. Si se aplicó un insumo de stock
-        if (!empty($idInsumo)) {
-            $stmtStkData = $pdo->prepare("SELECT costo_unitario, cantidad FROM dosisma_rma_bd.stock WHERE id = :id");
-            $stmtStkData->execute([":id" => $idInsumo]);
-            $stkRow = $stmtStkData->fetch(PDO::FETCH_ASSOC);
-
-            if ($stkRow && $stkRow['cantidad'] > 0) {
-                // Descontar stock
-                $pdo->prepare("UPDATE dosisma_rma_bd.stock SET cantidad = cantidad - 1 WHERE id = :id")->execute([":id" => $idInsumo]);
-
-                // Registrar en caso_insumos
-                $sqlIns = "INSERT INTO dosisma_rma_bd.caso_insumos (id_caso, id_stock, id_tecnico, cantidad, costo_aplicado, fecha_aplicacion, observacion)
-                           VALUES (:id_caso, :id_stock, :id_tecnico, 1, :costo, NOW(), :obs)";
-                $stmtIns = $pdo->prepare($sqlIns);
-                $stmtIns->execute([
-                    ":id_caso" => $idCaso,
-                    ":id_stock" => $idInsumo,
-                    ":id_tecnico" => $idTecnico,
-                    ":costo" => $stkRow['costo_unitario'],
-                    ":obs" => "Aplicado desde estación de trabajo"
-                ]);
-            }
+        $pdo->beginTransaction();
+        $stmt = $pdo->prepare('SELECT nombre FROM estados_caso WHERE id = ?');
+        $stmt->execute([$idEstado]);
+        $nombreEstado = $stmt->fetchColumn();
+        if ($nombreEstado === false) {
+            throw new DomainException('El estado seleccionado no existe.');
         }
-
-        echo json_encode(["status" => "success", "message" => "Avance registrado correctamente."]);
-
-    } catch (Exception $e) {
-        echo json_encode(["status" => "error", "message" => "Error guardando avance: " . $e->getMessage()]);
+        $stmt = $pdo->prepare('SELECT id, fecha_cierre, id_tecnico FROM casos WHERE id = ? FOR UPDATE');
+        $stmt->execute([$idCaso]);
+        $caso = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($caso && rmaRol() === 1 && (int)$caso['id_tecnico'] !== rmaUsuarioId()) {
+            throw new DomainException('Este caso no está asignado a tu usuario.');
+        }
+        if (!$caso || $caso['fecha_cierre'] !== null) {
+            throw new DomainException('El caso ya fue cerrado o no existe.');
+        }
+        $remision = null;
+        if ($idInsumo > 0) {
+            $remision = rmaRegistrarConsumo($pdo, $idCaso, $idInsumo, $idTecnico, 1, null, 'Aplicado desde estación de trabajo: ' . $diagnostico, rmaUsuarioId());
+        }
+        $cerrar = preg_match('/listo|entregado|resuelto/iu', (string) $nombreEstado) === 1;
+        $stmt = $pdo->prepare('UPDATE casos SET id_estado_actual = ?, diagnostico_final = ?, fecha_cierre = ' . ($cerrar ? 'NOW()' : 'NULL') . ' WHERE id = ?');
+        $stmt->execute([$idEstado, $diagnostico, $idCaso]);
+        $stmt = $pdo->prepare('INSERT INTO historial_estados (id_caso, id_estado, fecha, observacion, id_usuario) VALUES (?, ?, NOW(), ?, ?)');
+        $stmt->execute([$idCaso, $idEstado, $diagnostico, $idTecnico]);
+        $pdo->commit();
+        echo json_encode(['status' => 'success', 'message' => $remision
+            ? 'Avance guardado. Nota de remisión NR-' . str_pad((string) $remision, 6, '0', STR_PAD_LEFT) . ' pendiente en depósito.'
+            : 'Avance guardado correctamente.', 'remision_id' => $remision]);
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        rmaEnviarError($e);
     }
     exit;
 }

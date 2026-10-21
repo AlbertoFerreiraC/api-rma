@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/remisiones_auth.php';
+rmaPermitir([2, 5]);
 
 ini_set('display_errors', 1);
 error_reporting(E_ALL);

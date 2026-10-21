@@ -41,21 +41,8 @@ try {
 
     $storedPassword = $user["contrasena_hash"];
 
-    // ==========================================
-    // 🔐 VALIDACIÓN DOBLE (HASH + TEXTO PLANO)
-    // ==========================================
-
-    $isValid = false;
-
-    // 1. Si es hash bcrypt
-    if (str_starts_with($storedPassword, '$2y$')) {
-        $isValid = password_verify($password, $storedPassword);
-    }
-
-    // 2. Si es texto plano (legacy)
-    else {
-        $isValid = ($password === $storedPassword);
-    }
+    $tieneHash = password_get_info($storedPassword)['algo'] !== null || preg_match('/^\$2[aby]\$/', $storedPassword) === 1;
+    $isValid = $tieneHash ? password_verify($password, $storedPassword) : hash_equals($storedPassword, $password);
 
     if (!$isValid) {
         http_response_code(401);
@@ -67,6 +54,14 @@ try {
         exit;
     }
 
+    // Migración gradual: la próxima vez que el usuario inicie sesión, reemplazar clave legada en texto por bcrypt.
+    if (!$tieneHash) {
+        $newHash = password_hash($password, PASSWORD_BCRYPT);
+        $up = $pdo->prepare('UPDATE usuarios SET contrasena_hash = ? WHERE id = ? AND contrasena_hash = ?');
+        $up->execute([$newHash, $user['id'], $storedPassword]);
+    }
+    session_regenerate_id(true);
+
     /* =========================
         🔥 SESIÓN
     ========================= */
@@ -75,6 +70,7 @@ try {
     $_SESSION["usuario"] = $user["usuario"];
     $_SESSION["nombre"] = $user["nombre"];
     $_SESSION["email"] = $user["email"];
+    $_SESSION['rma_csrf'] = bin2hex(random_bytes(32));
 
     /* =========================
         REDIRECCIÓN POR ROL
@@ -87,6 +83,10 @@ try {
 
     if ((int) $user["id_rol"] === 2) {
         $redirigirA = "inicio";
+    }
+
+    if ((int) $user['id_rol'] === 5) {
+        $redirigirA = 'dashboardInventario';
     }
 
     echo json_encode([

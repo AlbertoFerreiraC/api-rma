@@ -1,70 +1,45 @@
 <?php
-ini_set('display_errors', 1);
-error_reporting(E_ALL);
-
-header("Content-Type: application/json; charset=UTF-8");
-header("Cache-Control: no-cache, no-store, must-revalidate");
-
-require_once "../db_inventario.php";
-
-if (!isset($pdo_inv)) {
-    echo json_encode(["status" => "error", "message" => "Error de conexión con la base de datos de inventario."]);
-    exit;
-}
-
-$action = $_GET["action"] ?? "";
-
-/*==================================================
-=        LISTAR CATÁLOGO DE STOCK                  =
-==================================================*/
-if ($action === "listar") {
-    try {
-        $stmt = $pdo_inv->query("SELECT * FROM productos ORDER BY id DESC");
-        echo json_encode([
-            "status" => "success",
-            "stock" => $stmt->fetchAll(PDO::FETCH_ASSOC)
-        ]);
-    } catch (Exception $e) {
-        echo json_encode(["status" => "error", "message" => $e->getMessage()]);
+declare(strict_types=1);
+require_once __DIR__.'/remisiones_auth.php';
+rmaPermitir([2,5]);
+require_once __DIR__.'/../db_inventario.php';
+require_once __DIR__.'/inventario_service.php';
+$action=(string)($_GET['action']??'listar');
+try {
+    if ($action==='listar') {
+        $items=$pdo_inv->query('SELECT * FROM productos ORDER BY id DESC')->fetchAll(PDO::FETCH_ASSOC);
+        echo json_encode(['status'=>'success','stock'=>array_map('rmaInvPublicar',$items)]); exit;
     }
-    exit;
-}
-
-/*==================================================
-=        GUARDAR NUEVO PRODUCTO                    =
-==================================================*/
-if ($action === "guardar" && $_SERVER["REQUEST_METHOD"] === "POST") {
-    try {
-        $input = json_decode(file_get_contents("php://input"), true);
-        
-        $codigo = trim($input["codigo"] ?? "");
-        $nombre = trim($input["nombre"] ?? "");
-        $categoria = trim($input["categoria"] ?? "");
-        $marca = trim($input["marca"] ?? "");
-        $stock_actual = intval($input["stock_actual"] ?? 0);
-        $stock_rma = intval($input["stock_rma"] ?? 0);
-        $stock_minimo = intval($input["stock_minimo"] ?? 5);
-
-        if ($codigo === "" || $nombre === "") {
-            throw new Exception("El código y el nombre del producto son obligatorios.");
-        }
-
-        $stock_disponible = $stock_actual - $stock_rma;
-        $estado_alerta = 'OK';
-        if ($stock_actual <= 0) {
-            $estado_alerta = 'SIN STOCK';
-        } elseif ($stock_disponible <= $stock_minimo) {
-            $estado_alerta = 'ALERTA - STOCK BAJO';
-        }
-
-        $stmt = $pdo_inv->prepare("INSERT INTO productos (codigo, nombre, categoria, marca, stock_actual, stock_rma, stock_disponible, estado_alerta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-        $stmt->execute([$codigo, $nombre, $categoria, $marca, $stock_actual, $stock_rma, $stock_disponible, $estado_alerta]);
-
-        echo json_encode(["status" => "success", "message" => "Producto registrado correctamente en el inventario."]);
-    } catch (Exception $e) {
-        echo json_encode(["status" => "error", "message" => $e->getMessage()]);
+    if ($action==='detalle') {
+        $id=rmaInvEntero($_GET['id']??null,'ID');
+        $s=$pdo_inv->prepare('SELECT * FROM productos WHERE id=?'); $s->execute([$id]); $p=$s->fetch(PDO::FETCH_ASSOC);
+        if (!$p) { http_response_code(404); echo json_encode(['status'=>'error','message'=>'El producto no existe.']); exit; }
+        echo json_encode(['status'=>'success','producto'=>rmaInvPublicar($p)]); exit;
     }
-    exit;
+    if (in_array($action,['actualizar','guardar'],true)) {
+        if ($_SERVER['REQUEST_METHOD']!=='POST') { http_response_code(405); echo json_encode(['status'=>'error','message'=>'Se requiere POST.']); exit; }
+        rmaCsrfValidar();
+        $datos=json_decode(file_get_contents('php://input'),true);
+        if (!is_array($datos)) throw new InvalidArgumentException('Datos inválidos.');
+        $pdo_inv->beginTransaction();
+        if ($action==='actualizar') $p=rmaInvActualizar($pdo_inv,$datos,rmaUsuarioId());
+        else {
+            $nuevo=rmaInvValidar($datos);
+            $s=$pdo_inv->prepare('INSERT INTO productos (codigo,nombre,categoria,marca,stock_actual,stock_rma,stock_minimo,estado_alerta) VALUES (?,?,?,?,?,?,?,?)');
+            $s->execute([$nuevo['codigo'],$nuevo['nombre'],$nuevo['categoria'],$nuevo['marca'],$nuevo['stock_actual'],$nuevo['stock_rma'],$nuevo['stock_minimo'],
+                rmaInvEstado($nuevo['stock_actual'],$nuevo['stock_rma'],$nuevo['stock_minimo'])]);
+            $id=(int)$pdo_inv->lastInsertId();
+            $s=$pdo_inv->prepare("INSERT INTO movimientos_inventario (producto_id,tipo_movimiento,cantidad,stock_anterior,stock_nuevo,usuario_id,referencia,observacion) VALUES (?,'AJUSTE',?,0,?,?,'Alta de producto','Stock inicial de inventario')");
+            $s->execute([$id,$nuevo['stock_actual'],$nuevo['stock_actual'],rmaUsuarioId()]);
+            $s=$pdo_inv->prepare('SELECT * FROM productos WHERE id=?'); $s->execute([$id]); $p=rmaInvPublicar($s->fetch(PDO::FETCH_ASSOC));
+        }
+        $pdo_inv->commit();
+        echo json_encode(['status'=>'success','message'=>'Inventario guardado correctamente.','producto'=>$p]); exit;
+    }
+    http_response_code(404); echo json_encode(['status'=>'error','message'=>'Acción no reconocida.']);
+} catch(Throwable $e) {
+    if ($pdo_inv->inTransaction()) $pdo_inv->rollBack();
+    if ($e instanceof UnexpectedValueException) { http_response_code(409); echo json_encode(['status'=>'error','message'=>$e->getMessage()]); }
+    elseif ($e instanceof PDOException && ($e->errorInfo[1]??null)===1062) { http_response_code(422); echo json_encode(['status'=>'error','message'=>'Ya existe un producto con ese código.']); }
+    else rmaEnviarError($e);
 }
-
-echo json_encode(["status" => "error", "message" => "Acción no reconocida."]);
