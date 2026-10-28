@@ -1,176 +1,34 @@
 <?php
-require_once __DIR__ . '/remisiones_auth.php';
-rmaPermitir([2, 5]);
-
-ini_set('display_errors', 1);
-error_reporting(E_ALL);
-
-header("Content-Type: application/json; charset=UTF-8");
-header("Cache-Control: no-cache, no-store, must-revalidate");
-
-require_once "../db.php";
-
-if (!isset($pdo)) {
-    echo json_encode([
-        "status" => "error",
-        "message" => "No fue posible establecer conexión con la base de datos de la matriz."
-    ]);
-    exit;
-}
-
-$action = $_GET["action"] ?? "";
-
-/*==================================================
-=        1. CONSULTAR ALERTAS Y METRICAS KPIS     =
-==================================================*/
-if ($action === "consultar_alertas") {
-    try {
-        // Consulta de insumos con cantidad menor o igual a stock_minimo
-        $sqlAlertas = "SELECT 
-                            s.id,
-                            s.codigo_sku,
-                            s.nombre,
-                            c.nombre AS categoria_nombre,
-                            p.nombre AS proveedor_nombre,
-                            s.cantidad,
-                            s.stock_minimo,
-                            s.costo_unitario
-                        FROM dosisma_rma_bd.stock s
-                        LEFT JOIN dosisma_rma_bd.categorias_stock c ON s.id_categoria = c.id
-                        LEFT JOIN dosisma_rma_bd.proveedores p ON s.id_proveedor_habitual = p.id
-                        WHERE s.cantidad <= s.stock_minimo
-                        ORDER BY s.cantidad ASC, s.nombre ASC";
-
-        $stmtAlertas = $pdo->prepare($sqlAlertas);
-        $stmtAlertas->execute();
-        $alertas = $stmtAlertas->fetchAll(PDO::FETCH_ASSOC);
-
-        // Cálculo de KPIs
-        $agotados = 0;
-        $criticos = 0;
-        $proveedoresUnicos = [];
-        $costoReposicionEstimado = 0;
-
-        foreach ($alertas as $item) {
-            if (intval($item['cantidad']) <= 0) {
-                $agotados++;
-            } else {
-                $criticos++;
-            }
-
-            if (!empty($item['proveedor_nombre'])) {
-                $proveedoresUnicos[$item['proveedor_nombre']] = true;
-            }
-
-            // Deficit para cubrir stock mínimo
-            $deficit = intval($item['stock_minimo']) - intval($item['cantidad']);
-            $unidadesAComprar = $deficit > 0 ? $deficit : 1;
-            $costoReposicionEstimado += ($unidadesAComprar * floatval($item['costo_unitario']));
-        }
-
-        echo json_encode([
-            "status" => "success",
-            "alertas" => $alertas,
-            "kpis" => [
-                "agotados" => $agotados,
-                "criticos" => $criticos,
-                "proveedores_impactados" => count($proveedoresUnicos),
-                "costo_reposicion_estimado" => $costoReposicionEstimado
-            ]
-        ]);
-
-    } catch (Exception $e) {
-        echo json_encode([
-            "status" => "error",
-            "message" => "Error al obtener las alertas de stock: " . $e->getMessage()
-        ]);
+declare(strict_types=1);
+require_once __DIR__.'/remisiones_auth.php';rmaPermitir([2,5]);
+require_once __DIR__.'/../db_config.php';require_once __DIR__.'/operaciones_service.php';
+$action=(string)($_GET['action']??'');$fuente=(string)($_GET['fuente']??'central');
+try {
+    if(!in_array($fuente,['central','insumos'],true))throw new InvalidArgumentException('Inventario inválido.');
+    $p=rmaConexion($fuente==='central'?'inventario':'rma');
+    if($action==='consultar_alertas') {
+        if($fuente==='central')$rows=$p->query("SELECT id,codigo AS codigo_sku,nombre,categoria AS categoria_nombre,'' AS proveedor_nombre,stock_actual-stock_rma AS cantidad,stock_minimo FROM productos WHERE stock_actual-stock_rma<=stock_minimo ORDER BY cantidad,nombre")->fetchAll();
+        else $rows=$p->query('SELECT s.id,s.codigo_sku,s.nombre,c.nombre AS categoria_nombre,p.nombre AS proveedor_nombre,s.cantidad,s.stock_minimo FROM stock s LEFT JOIN categorias_stock c ON c.id=s.id_categoria LEFT JOIN proveedores p ON p.id=s.id_proveedor_habitual WHERE s.cantidad<=s.stock_minimo ORDER BY s.cantidad,s.nombre')->fetchAll();
+        $k=['agotados'=>0,'criticos'=>0,'proveedores_impactados'=>0,'unidades_reponer'=>0];$proveedores=[];
+        foreach($rows as &$r){$r['fuente']=$fuente;$r['unidades_reponer']=max(1,(int)$r['stock_minimo']-(int)$r['cantidad']+1);$k['unidades_reponer']+=$r['unidades_reponer'];$k[(int)$r['cantidad']<=0?'agotados':'criticos']++;if($r['proveedor_nombre'])$proveedores[$r['proveedor_nombre']]=true;}unset($r);
+        $k['proveedores_impactados']=count($proveedores);echo json_encode(['status'=>'success','alertas'=>$rows,'kpis'=>$k]);exit;
     }
-    exit;
-}
-
-/*==================================================
-=        2. REABASTECER INSUMO (RESTOCK)          =
-==================================================*/
-if ($action === "reabastecer" && $_SERVER["REQUEST_METHOD"] === "POST") {
-    try {
-        if (session_status() === PHP_SESSION_NONE) {
-            session_start();
+    if($action==='reabastecer') {
+        if($_SERVER['REQUEST_METHOD']!=='POST'){http_response_code(405);exit;}
+        rmaCsrfValidar();$d=json_decode(file_get_contents('php://input'),true);if(!is_array($d))throw new InvalidArgumentException('Datos inválidos.');
+        $id=rmaInvEntero($d['id']??null,'Ítem');$n=rmaCantidadPositiva($d['cantidad_ingreso']??null);$motivo=rmaMotivo($d['motivo']??null);
+        $p->beginTransaction();
+        if($fuente==='central') {
+            $s=$p->prepare('SELECT * FROM productos WHERE id=? FOR UPDATE');$s->execute([$id]);$row=$s->fetch();if(!$row)throw new DomainException('El producto no existe.');
+            $a=(int)$row['stock_actual'];$nuevo=rmaInvEntero($a+$n,'Stock');
+            $s=$p->prepare('UPDATE productos SET stock_actual=?,estado_alerta=?,updated_at=NOW() WHERE id=?');$s->execute([$nuevo,rmaInvEstado($nuevo,(int)$row['stock_rma'],(int)$row['stock_minimo']),$id]);
+            $s=$p->prepare("INSERT INTO movimientos_inventario (producto_id,tipo_movimiento,cantidad,stock_anterior,stock_nuevo,usuario_id,observacion) VALUES (?,'REPOSICION',?,?,?,?,?)");$s->execute([$id,$n,$a,$nuevo,rmaUsuarioId(),$motivo]);
+        }else {
+            $s=$p->prepare('SELECT cantidad FROM stock WHERE id=? FOR UPDATE');$s->execute([$id]);$a=$s->fetchColumn();if($a===false)throw new DomainException('El insumo no existe.');$nuevo=rmaInvEntero((int)$a+$n,'Stock');
+            $s=$p->prepare('UPDATE stock SET cantidad=?,updated_at=NOW() WHERE id=?');$s->execute([$nuevo,$id]);
+            $s=$p->prepare("INSERT INTO movimientos_stock (id_stock,tipo_movimiento,cantidad,stock_anterior,stock_nuevo,id_usuario,motivo) VALUES (?,'ENTRADA',?,?,?,?,?)");$s->execute([$id,$n,$a,$nuevo,rmaUsuarioId(),mb_substr($motivo,0,255)]);
         }
-
-        $input = json_decode(file_get_contents("php://input"), true);
-
-        if (!$input) {
-            throw new Exception("Carga útil JSON inválida.");
-        }
-
-        $id_stock = intval($input["id"] ?? 0);
-        $cantidad_ingreso = intval($input["cantidad_ingreso"] ?? 0);
-        $motivo = trim($input["motivo"] ?? "");
-        $id_usuario = intval($_SESSION['id_usuario'] ?? 1); // fallback ID 1 si no hay sesión activa
-
-        if ($id_stock <= 0 || $cantidad_ingreso <= 0) {
-            throw new Exception("Estructura de datos incompleta o cantidad no válida para el reabastecimiento.");
-        }
-
-        if ($motivo === "") {
-            $motivo = "Reabastecimiento directo de inventario por alerta de stock mínimo.";
-        }
-
-        $pdo->beginTransaction();
-
-        // 1. Consultar stock actual
-        $stmtConsultar = $pdo->prepare("SELECT cantidad FROM dosisma_rma_bd.stock WHERE id = ? FOR UPDATE");
-        $stmtConsultar->execute([$id_stock]);
-        $insumoActual = $stmtConsultar->fetch(PDO::FETCH_ASSOC);
-
-        if (!$insumoActual) {
-            throw new Exception("El insumo seleccionado no existe en el catálogo.");
-        }
-
-        $stockAnterior = intval($insumoActual['cantidad']);
-        $stockNuevo = $stockAnterior + $cantidad_ingreso;
-
-        // 2. Actualizar la cantidad en la tabla stock
-        $stmtUpdate = $pdo->prepare("UPDATE dosisma_rma_bd.stock SET cantidad = ?, updated_at = NOW() WHERE id = ?");
-        $stmtUpdate->execute([$stockNuevo, $id_stock]);
-
-        // 3. Registrar el log de 'ENTRADA' en la tabla movimientos_stock
-        $sqlMov = "INSERT INTO dosisma_rma_bd.movimientos_stock 
-                    (id_stock, tipo_movimiento, cantidad, stock_anterior, stock_nuevo, id_usuario, motivo, fecha) 
-                   VALUES (?, 'ENTRADA', ?, ?, ?, ?, ?, NOW())";
-
-        $stmtMov = $pdo->prepare($sqlMov);
-        $stmtMov->execute([
-            $id_stock,
-            $cantidad_ingreso,
-            $stockAnterior,
-            $stockNuevo,
-            $id_usuario,
-            $motivo
-        ]);
-
-        $pdo->commit();
-
-        echo json_encode([
-            "status" => "success",
-            "message" => "Stock reabastecido con éxito. Se han ingresado " . $cantidad_ingreso . " unidades al inventario."
-        ]);
-
-    } catch (Exception $e) {
-        if ($pdo->inTransaction()) {
-            $pdo->rollBack();
-        }
-
-        echo json_encode([
-            "status" => "error",
-            "message" => $e->getMessage()
-        ]);
+        $p->commit();echo json_encode(['status'=>'success','message'=>'Reposición registrada correctamente.']);exit;
     }
-    exit;
-}
-
-// Fallback por si ejecutan una acción errónea
-echo json_encode([
-    "status" => "error",
-    "message" => "Protocolo de alertas no reconocido por la matriz de control."
-]);
+    http_response_code(404);echo json_encode(['status'=>'error','message'=>'Acción inválida.']);
+}catch(Throwable $e){if(isset($p)&&$p->inTransaction())$p->rollBack();rmaEnviarError($e);}

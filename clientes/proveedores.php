@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__.'/../inventario/remisiones_auth.php';
+rmaPermitir([1,2]);
 header("Content-Type: application/json; charset=utf-8");
 header("Cache-Control: no-cache, no-store, must-revalidate");
 

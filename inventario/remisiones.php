@@ -8,13 +8,14 @@ require_once __DIR__ . '/../db.php';
 $action = (string) ($_GET['action'] ?? 'listar');
 $tecnico = rmaRol() === 1;
 $select = "SELECT n.*, u.nombre AS tecnico_nombre, uc.nombre AS creador_nombre,
-    uf.nombre AS cierre_nombre, c.equipo, cl.nombre AS cliente_nombre
+    uf.nombre AS cierre_nombre, c.equipo, c.marca, c.modelo, c.numero_serie,
+    cl.nombre AS cliente_nombre, cl.cedula AS cliente_cedula, cl.celular AS cliente_celular
     FROM notas_remision n LEFT JOIN usuarios u ON n.id_tecnico=u.id
     LEFT JOIN usuarios uc ON n.id_usuario_creador=uc.id
     LEFT JOIN usuarios uf ON n.id_usuario_cierre=uf.id
     LEFT JOIN casos c ON n.id_caso=c.id LEFT JOIN clientes cl ON c.id_cliente=cl.id";
 $publicar = static function (array $nota) use ($tecnico): array {
-    if ($tecnico) unset($nota['costo_unitario']);
+    unset($nota['costo_unitario']);
     return $nota;
 };
 try {
@@ -67,9 +68,12 @@ try {
         }
         if ($action === 'pdf') {
             require_once __DIR__ . '/remisiones_pdf.php';
+            $pdf = rmaRemisionPdf($nota);
             header('Content-Type: application/pdf');
+            header('Content-Length: '.strlen($pdf));
+            header('X-Content-Type-Options: nosniff');
             header('Content-Disposition: inline; filename="NR-' . str_pad((string)$id, 6, '0', STR_PAD_LEFT) . '.pdf"');
-            echo rmaRemisionPdf($nota);
+            echo $pdf;
             exit;
         }
         echo json_encode(['status' => 'success', 'remision' => $publicar($nota)]);

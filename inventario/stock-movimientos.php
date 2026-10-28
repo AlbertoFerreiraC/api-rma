@@ -19,6 +19,7 @@ if (!isset($pdo)) {
 }
 
 $action = $_GET["action"] ?? "";
+if (in_array($action,["ajustar","guardar"],true)) { http_response_code(410); echo json_encode(["status"=>"error","message"=>"Usá Asignaciones, Movimientos o Bajas de stock para registrar operaciones trazables."]); exit; }
 
 /*==================================================
 =        1. LISTAR MOVIMIENTOS DEL KARDEX         =

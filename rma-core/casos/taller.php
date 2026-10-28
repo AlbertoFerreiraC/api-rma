@@ -6,7 +6,10 @@ error_reporting(E_ALL);
 header("Content-Type: application/json; charset=UTF-8");
 header("Cache-Control: no-cache, no-store, must-revalidate");
 
-require_once "../../db.php";
+require_once __DIR__.'/../../inventario/remisiones_auth.php';
+rmaPermitir([1,2]);
+require_once __DIR__.'/../../db.php';
+require_once __DIR__.'/evidencias_service.php';
 
 if (!isset($pdo)) {
     echo json_encode(["status" => "error", "message" => "Conexión caída con la base de datos central."]);
@@ -89,9 +92,12 @@ if ($action === "obtener_caso") {
 }
 
 if ($action === "guardar_diagnostico" && $_SERVER["REQUEST_METHOD"] === "POST") {
+    rmaCsrfValidar();
+    $nuevasFotos=[];
     try {
+        $pdo->beginTransaction();
         $id_caso = intval($_POST["id_caso"] ?? 0);
-        $id_usuario = intval($_POST["id_usuario"] ?? 0);
+        $id_usuario = rmaUsuarioId();
         $id_estado_actual = intval($_POST["id_estado_actual"] ?? 0);
         $diagnostico_final = trim($_POST["diagnostico_final"] ?? "");
 
@@ -104,25 +110,9 @@ if ($action === "guardar_diagnostico" && $_SERVER["REQUEST_METHOD"] === "POST") 
         $caso_actual = $stmt_check->fetch(PDO::FETCH_ASSOC);
         $nombre_foto_bd = $caso_actual["foto_archivo"] ?? null;
 
-        if (isset($_FILES["foto_archivo"]) && $_FILES["foto_archivo"]["error"] === UPLOAD_ERR_OK) {
-            $file_tmp = $_FILES["foto_archivo"]["tmp_name"];
-            $file_ext = strtolower(pathinfo($_FILES["foto_archivo"]["name"], PATHINFO_EXTENSION));
-
-            if (!in_array($file_ext, ["jpg", "jpeg", "png", "webp"])) {
-                throw new Exception("Extensión de imagen inválida.");
-            }
-
-            $nombre_foto_bd = "DIAGNOSTICO_" . uniqid() . "." . $file_ext;
-            $upload_dir = rtrim($_SERVER['DOCUMENT_ROOT'], '/\\') . '/rma-app/uploads/';
-
-            if (!is_dir($upload_dir)) {
-                mkdir($upload_dir, 0777, true);
-            }
-
-            if (!move_uploaded_file($file_tmp, $upload_dir . $nombre_foto_bd)) {
-                throw new Exception("Fallo al escribir la evidencia en disco.");
-            }
-        }
+        $nuevasFotos=rmaRecibirFotos($_FILES['foto_archivo']??null);
+        rmaAnexarFotos($pdo,$id_caso,array_merge([$nombre_foto_bd],$nuevasFotos));
+        if($nuevasFotos)$nombre_foto_bd=$nuevasFotos[0];
 
         $sql_update = "UPDATE dosisma_rma_bd.casos 
                        SET diagnostico_final = ?, id_estado_actual = ?, foto_archivo = ? 
@@ -140,12 +130,15 @@ if ($action === "guardar_diagnostico" && $_SERVER["REQUEST_METHOD"] === "POST") 
         $stmt_hist = $pdo->prepare($sql_historial);
         $stmt_hist->execute([$id_caso, $id_estado_actual, $observacion_historial, $id_usuario]);
 
+        $pdo->commit();
         echo json_encode([
             "status" => "success",
             "message" => "Logs de reparación inyectados con éxito. Historial de estados modificado."
         ]);
 
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
+        if($pdo->inTransaction())$pdo->rollBack();
+        rmaRetirarFotos($nuevasFotos);
         echo json_encode(["status" => "error", "message" => $e->getMessage()]);
     }
     exit;

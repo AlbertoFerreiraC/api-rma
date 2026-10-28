@@ -1,0 +1,9 @@
+-- Ejecutar en dosisma_rma_bd.
+CREATE TABLE IF NOT EXISTS caso_fotos (
+ id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+ id_caso INT NOT NULL,
+ archivo VARCHAR(255) NOT NULL,
+ fecha DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE KEY uq_caso_foto (id_caso,archivo),
+ CONSTRAINT fk_fotos_caso FOREIGN KEY (id_caso) REFERENCES casos(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

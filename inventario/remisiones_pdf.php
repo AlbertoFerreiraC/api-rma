@@ -11,15 +11,21 @@ final class RmaRemisionDocumento
     private array $nota;
     public float $y=0;
     public string $numero;
-    public function __construct(array $nota)
+    private bool $reporte=false;
+    private float $pageWidth=612;
+    private float $pageHeight=792;
+    public function __construct(array $nota, bool $reporte=false)
     {
         $this->nota=$nota;
-        $this->numero='NR-'.str_pad((string)$nota['id'],6,'0',STR_PAD_LEFT);
+        $this->reporte=$reporte;
+        if($reporte){$this->pageWidth=842;$this->pageHeight=595;}
+        $this->numero=$reporte ? 'REPORTE' : 'NR-'.str_pad((string)$nota['id'],6,'0',STR_PAD_LEFT);
         $this->widths=require __DIR__.'/pdf_font_widths.php';
         $this->newPage();
     }
     private function encode(string $text): string
     {
+        $text=str_replace(['↔','→','←','₲'],['<->','->','<-','Gs.'],$text);
         $text=preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u','',$text)??'';
         return iconv('UTF-8','Windows-1252//TRANSLIT',$text) ?: '';
     }
@@ -53,16 +59,16 @@ final class RmaRemisionDocumento
     {
         if ($align==='right') $x+=$width-$this->width($text,$size,$bold);
         if ($align==='center') $x+=($width-$this->width($text,$size,$bold))/2;
-        $font=$bold?'F2':'F1'; $baseline=792-$top-$size;
+        $font=$bold?'F2':'F1'; $baseline=$this->pageHeight-$top-$size;
         $this->stream.=sprintf("BT /%s %.2F Tf 0.08 0.08 0.08 rg 1 0 0 1 %.2F %.2F Tm (%s) Tj ET\n",$font,$size,$x,$baseline,$this->escape($text));
     }
     public function line(float $x,float $y,float $x2,float $y2,bool $dash=false): void
     {
-        $this->stream.=sprintf("0.25 G 0.55 w %s %.2F %.2F m %.2F %.2F l S [] 0 d\n",$dash?'[3 3] 0 d':'[] 0 d',$x,792-$y,$x2,792-$y2);
+        $this->stream.=sprintf("0.25 G 0.55 w %s %.2F %.2F m %.2F %.2F l S [] 0 d\n",$dash?'[3 3] 0 d':'[] 0 d',$x,$this->pageHeight-$y,$x2,$this->pageHeight-$y2);
     }
     public function box(float $x,float $top,float $width,float $height,float $gray=.96): void
     {
-        $this->stream.=sprintf("%.2F g %.2F %.2F %.2F %.2F re f\n",$gray,$x,792-$top-$height,$width,$height);
+        $this->stream.=sprintf("%.2F g %.2F %.2F %.2F %.2F re f\n",$gray,$x,$this->pageHeight-$top-$height,$width,$height);
     }
     public function image(string $bytes,float $x,float $top,float $w,float $h): void
     {
@@ -87,13 +93,22 @@ final class RmaRemisionDocumento
     {
         if ($this->stream!=='') $this->pages[]=$this->stream;
         $this->stream='';
+        if($this->reporte){
+            $this->text(32,22,'MICRO EXPRESS / REPORTE DEL SISTEMA',13,true);
+            $this->text(610,25,$this->date($this->nota['fecha_creacion']),8,false,'right',200);
+            $lines=$this->wrap($this->nota['titulo']??'Listado',778,9);
+            foreach($lines as $i=>$line)$this->text(32,45+$i*12,$line,9);
+            $this->y=55+count($lines)*12;
+            $this->text(32,$this->y,($this->nota['estado']??'').' | Exportación de la vista con sus filtros actuales',8);
+            $this->y+=22;return;
+        }
         $this->text(32,24,'DEPARTAMENTO TÉCNICO / DEPÓSITO',8,true);
         $this->text(32,41,'Micro Express',24,true);
         $this->text(34,71,'I N F O R M Á T I C A',10,true);
         $this->text(32,93,'VENTA AL POR MAYOR DE EQUIPOS INFORMÁTICOS Y SOFTWARE',7.5);
         $this->text(32,105,'Avda. J. Kubitschek 796 c/ Celsa Speratti - Asunción, Paraguay',8);
         $this->text(32,117,'Tel.: (595-21) 226 979 / 225 037 / 214 539 / 204 886',7.5);
-        $this->text(395,27,'NOTA DE REMISIÓN',11,true,'right',185);
+        $this->text(395,27,$this->reporte?'REPORTE DEL SISTEMA':'NOTA DE REMISIÓN',11,true,'right',185);
         $this->text(395,48,$this->numero,19,true,'right',185);
         $this->text(395,77,'FECHA: '.$this->date($this->nota['fecha_creacion']),8.5,false,'right',185);
         $this->box(428,101,152,23,.93);
@@ -151,6 +166,37 @@ final class RmaRemisionDocumento
             $this->y+=$h+12; $offset+=$take;
         }
     }
+    public function listado(array $headers,array $rows):void
+    {
+        $weights=[];
+        foreach($headers as $h){$weights[]=preg_match('/informe|motivo|observaci|problema/iu',$h)?8:(preg_match('/producto|insumo|cliente|técnico|responsable/iu',$h)?5:3);}
+        $widths=array_map(static fn($w)=>30+(778-count($headers)*30)*$w/array_sum($weights),$weights);
+        $headLines=[];$headCount=1;
+        foreach($headers as $i=>$h){$headLines[$i]=$this->wrap($h,$widths[$i]-10,7.5,true);$headCount=max($headCount,count($headLines[$i]));}
+        $headHeight=$headCount*10+12;
+        $drawHeader=function()use($headLines,$widths,$headHeight):void{
+            $this->box(32,$this->y,778,$headHeight,.92);$x=32;
+            foreach($headLines as $i=>$lines){foreach($lines as $j=>$line)$this->text($x+5,$this->y+5+$j*10,$line,7.5,true);$x+=$widths[$i];}
+            $this->y+=$headHeight;
+        };
+        $drawHeader();
+        foreach($rows as $index=>$row){
+            $all=[];$count=1;
+            foreach($row as $i=>$value){$all[$i]=$this->wrap($value,$widths[$i]-10,7.5);$count=max($count,count($all[$i]));}
+            $offset=0;
+            while($offset<$count){
+                if($this->y+22>553){$this->newPage();$drawHeader();}
+                $take=min($count-$offset,max(1,(int)floor((553-$this->y-12)/10)));
+                $height=$take*10+12;
+                if($index%2===1)$this->box(32,$this->y,778,$height,.975);
+                $x=32;
+                foreach($all as $i=>$lines){foreach(array_slice($lines,$offset,$take) as $j=>$line)$this->text($x+5,$this->y+5+$j*10,$line,7.5);$x+=$widths[$i];}
+                $this->line(32,$this->y+$height,810,$this->y+$height);$this->y+=$height;$offset+=$take;
+                if($offset<$count){$this->newPage();$drawHeader();}
+            }
+        }
+        if(!$rows)$this->text(37,$this->y+12,'No hay registros para los filtros seleccionados.',9);
+    }
     public function finish(): string
     {
         $this->pages[]=$this->stream; $objects=[1=>'<< /Type /Catalog /Pages 2 0 R >>',2=>'',
@@ -163,10 +209,10 @@ final class RmaRemisionDocumento
         }
         $kids=[];
         foreach($this->pages as $i=>$stream) {
-            $footer=$this->numero.' | Caso '.$this->nota['numero_caso'].' | Página '.($i+1).' de '.count($this->pages);
+            $footer=($this->reporte?'Micro Express | Reporte':$this->numero.' | Caso '.$this->nota['numero_caso']).' | Página '.($i+1).' de '.count($this->pages);
             $stream.=sprintf("BT /F1 7 Tf 0.4 g 32 22 Td (%s) Tj ET\n",$this->escape($footer));
             $page=$next++; $content=$next++; $kids[]="$page 0 R";
-            $objects[$page]="<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << $resources >> >> /Contents $content 0 R >>";
+            $objects[$page]="<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {$this->pageWidth} {$this->pageHeight}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << $resources >> >> /Contents $content 0 R >>";
             $objects[$content]="<< /Length ".strlen($stream)." >>\nstream\n".$stream."endstream";
         }
         $objects[2]='<< /Type /Pages /Kids ['.implode(' ',$kids).'] /Count '.count($this->pages).' >>';

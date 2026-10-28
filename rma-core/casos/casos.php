@@ -6,7 +6,10 @@ error_reporting(E_ALL);
 header("Content-Type: application/json; charset=UTF-8");
 header("Cache-Control: no-cache, no-store, must-revalidate");
 
-require_once "../../db.php";
+require_once __DIR__.'/../../inventario/remisiones_auth.php';
+rmaPermitir([1,2]);
+require_once __DIR__.'/../../db.php';
+require_once __DIR__.'/evidencias_service.php';
 
 if (!isset($pdo)) {
     echo json_encode([
@@ -17,6 +20,10 @@ if (!isset($pdo)) {
 }
 
 $action = $_GET["action"] ?? "";
+if ($action==='aux_tecnicos') {
+    echo json_encode(['status'=>'success','tecnicos'=>$pdo->query('SELECT id,nombre FROM usuarios WHERE id_rol=1 ORDER BY nombre')->fetchAll(PDO::FETCH_ASSOC)]);
+    exit;
+}
 
 if ($action === "aux_clientes") {
     try {
@@ -69,9 +76,11 @@ if ($action === "obtener_proximo_numero") {
 }
 
 if ($action === "guardar" && $_SERVER["REQUEST_METHOD"] === "POST") {
+    rmaCsrfValidar();
+    $nuevasFotos=[];
     try {
         $id_cliente = intval($_POST["id_cliente"] ?? 0);
-        $id_tecnico = intval($_POST["id_tecnico"] ?? 0);
+        $id_tecnico = rmaRol()===1 ? rmaUsuarioId() : intval($_POST["id_tecnico"] ?? 0);
 
         // ✅ CORRECCIÓN CRÍTICA: Se lee 'id_tipo_caso' directamente del Payload
         $id_tipo_caso = intval($_POST["id_tipo_caso"] ?? $_POST["id_tipo_case"] ?? 0);
@@ -87,6 +96,9 @@ if ($action === "guardar" && $_SERVER["REQUEST_METHOD"] === "POST") {
         if ($id_cliente <= 0 || $id_tipo_caso <= 0 || $equipo === "" || $marca === "" || $numero_serie === "") {
             throw new Exception("Datos obligatorios incompletos en el vector de transmisión.");
         }
+        $validarTecnico=$pdo->prepare('SELECT id FROM usuarios WHERE id=? AND id_rol=1');
+        $validarTecnico->execute([$id_tecnico]);
+        if(!$validarTecnico->fetchColumn())throw new InvalidArgumentException('Seleccioná un técnico responsable.');
 
         $stmt_num = $pdo->prepare("SELECT MAX(id) as ultimo_id FROM dosisma_rma_bd.casos");
         $stmt_num->execute();
@@ -94,30 +106,9 @@ if ($action === "guardar" && $_SERVER["REQUEST_METHOD"] === "POST") {
         $real_id = intval($res_num['ultimo_id'] ?? 0) + 1;
         $numero_caso_final = "RMA-" . date("Y") . "-" . str_pad($real_id, 4, "0", STR_PAD_LEFT);
 
-        $nombre_foto_bd = null;
-        if (isset($_FILES["foto_archivo"]) && $_FILES["foto_archivo"]["error"] === UPLOAD_ERR_OK) {
-
-            $file_tmp = $_FILES["foto_archivo"]["tmp_name"];
-            $file_name = $_FILES["foto_archivo"]["name"];
-            $file_ext = strtolower(pathinfo($file_name, PATHINFO_EXTENSION));
-
-            $allowed_exts = ["jpg", "jpeg", "png", "webp"];
-            if (!in_array($file_ext, $allowed_exts)) {
-                throw new Exception("Extensión de archivo denegada. Solo imágenes permitidas.");
-            }
-
-            $nombre_foto_bd = "EVIDENCIA_" . uniqid() . "." . $file_ext;
-
-            $upload_dir = rtrim($_SERVER['DOCUMENT_ROOT'], '/\\') . '/rma-app/uploads/';
-
-            if (!is_dir($upload_dir)) {
-                mkdir($upload_dir, 0777, true);
-            }
-
-            if (!move_uploaded_file($file_tmp, $upload_dir . $nombre_foto_bd)) {
-                throw new Exception("Fallo al escribir la evidencia visual en el almacenamiento físico absoluto.");
-            }
-        }
+        $nuevasFotos=rmaRecibirFotos($_FILES['foto_archivo']??null);
+        $nombre_foto_bd=$nuevasFotos[0]??null;
+        $pdo->beginTransaction();
 
         $qr_placeholder = "QR_" . $numero_caso_final;
 
@@ -144,6 +135,7 @@ if ($action === "guardar" && $_SERVER["REQUEST_METHOD"] === "POST") {
         ]);
 
         $id_caso_insertado = $pdo->lastInsertId();
+        rmaAnexarFotos($pdo,(int)$id_caso_insertado,$nuevasFotos);
 
         $sql_historial = "INSERT INTO dosisma_rma_bd.historial_estados (
                             id_caso, id_estado, fecha, observacion, id_usuario
@@ -155,6 +147,8 @@ if ($action === "guardar" && $_SERVER["REQUEST_METHOD"] === "POST") {
             "INGRESO INICIAL AUTOMÁTICO DESDE SISTEMA",
             $id_tecnico
         ]);
+
+        $pdo->commit();
 
         $protocolo = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https://" : "http://";
         $host = $_SERVER['HTTP_HOST'];
@@ -170,11 +164,14 @@ if ($action === "guardar" && $_SERVER["REQUEST_METHOD"] === "POST") {
             "status" => "success",
             "message" => "Caso registrado bajo la firma: $numero_caso_final.",
             "numero_caso" => $numero_caso_final,
+            "id_caso" => (int)$id_caso_insertado,
             "qr_url" => $qr_image_url,
             "link_pdf" => $url_visualizacion
         ]);
 
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
+        if($pdo->inTransaction())$pdo->rollBack();
+        rmaRetirarFotos($nuevasFotos);
         echo json_encode([
             "status" => "error",
             "message" => $e->getMessage()

@@ -22,9 +22,10 @@ if ($action === "listar_logistica") {
 
         $sql = "SELECT 
                     c.id, c.numero_caso, c.equipo, c.marca, c.numero_serie, c.id_estado_actual,
-                    p.nombre AS proveedor_nombre
+                    p.nombre AS proveedor_nombre, e.nombre AS estado_nombre
                 FROM dosisma_rma_bd.casos c
-                LEFT JOIN dosisma_rma_bd.proveedores p ON c.id_proveedor = p.id";
+                LEFT JOIN dosisma_rma_bd.proveedores p ON c.id_proveedor = p.id
+                LEFT JOIN dosisma_rma_bd.estados_caso e ON c.id_estado_actual=e.id";
 
         $conditions = [];
         $params = [];

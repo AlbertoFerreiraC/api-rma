@@ -54,6 +54,9 @@ function rmaInvActualizar(PDO $pdo, array $datos, int $usuario): array
     if (!is_string($datos['version']??null) || !hash_equals(rmaInvVersion($antes),$datos['version'])) {
         throw new UnexpectedValueException('Otro usuario modificó este producto. Volvé a abrirlo antes de guardar.');
     }
+    $saldo=$pdo->prepare("SELECT COALESCE(SUM(CASE WHEN tipo='CENTRAL_RMA' THEN cantidad WHEN tipo IN ('RMA_CENTRAL','BAJA_RMA') THEN -cantidad ELSE 0 END),0) FROM operaciones_rma WHERE producto_id=?");
+    $saldo->execute([$id]);
+    if($nuevo['stock_rma']<(int)$saldo->fetchColumn())throw new DomainException('El stock en RMA no puede ser menor que las unidades asignadas a casos. Registrá primero las devoluciones o bajas correspondientes.');
     $cambios=[];
     foreach ($nuevo as $k=>$v) if ((string)$antes[$k] !== (string)$v) $cambios[]="$k: ".$antes[$k].' -> '.$v;
     if (!$cambios) return rmaInvPublicar($antes);

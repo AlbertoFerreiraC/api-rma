@@ -25,7 +25,7 @@ function rmaRegistrarConsumo(PDO $pdo, int $casoId, int $stockId, int $tecnicoId
         throw new DomainException('Este caso RMA ya está cerrado.');
     }
 
-    $stmt = $pdo->prepare('SELECT id FROM usuarios WHERE id = ?');
+    $stmt = $pdo->prepare('SELECT id FROM usuarios WHERE id = ? AND id_rol=1');
     $stmt->execute([$tecnicoId]);
     if (!$stmt->fetchColumn()) {
         throw new DomainException('El técnico seleccionado no existe.');
@@ -46,8 +46,8 @@ function rmaRegistrarConsumo(PDO $pdo, int $casoId, int $stockId, int $tecnicoId
         throw new DomainException('El costo del insumo no es válido.');
     }
     $observacion = trim($observacion ?? '');
-    if (strlen($observacion) > 2000) {
-        throw new InvalidArgumentException('La observación excede los 2000 caracteres permitidos.');
+    if (mb_strlen($observacion) > 255) {
+        throw new InvalidArgumentException('La observación excede los 255 caracteres permitidos.');
     }
 
     $insertar = $pdo->prepare('INSERT INTO caso_insumos (id_caso, id_stock, id_tecnico, cantidad, costo_aplicado, fecha_aplicacion, observacion) VALUES (?, ?, ?, ?, ?, NOW(), ?)');

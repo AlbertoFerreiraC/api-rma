@@ -69,7 +69,7 @@ if ($action === "consultar_sla") {
                        FROM dosisma_rma_bd.casos c
                        LEFT JOIN dosisma_rma_bd.clientes cl ON c.id_cliente = cl.id
                        LEFT JOIN dosisma_rma_bd.estados_caso e ON c.id_estado_actual = e.id
-                       ORDER BY c.id DESC LIMIT 20";
+                       ORDER BY c.id DESC";
         $stmtDet = $pdo->prepare($sqlDetalle);
         $stmtDet->execute();
         $casosDetalle = $stmtDet->fetchAll(PDO::FETCH_ASSOC);
